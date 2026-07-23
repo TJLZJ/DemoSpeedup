@@ -2,13 +2,14 @@
 """
 自适应加速因子训练与评估主流程。
 
-需先运行 compute_factors.py 生成 /adaptive_factors 到 HDF5 文件。
+需先运行 compute_factors.py 生成 factors_{chunk}_{mode}_{thmode}_{value} 到 HDF5 文件。
 
 用法:
-  # 训练
+  # 训练 (--speedup 时需--mode --threshold_mode --threshold / --ratio)
   python adaptive_acc/train.py \
       --task_name sim_insertion_human --ckpt_dir ... \
       --policy_class ACT --chunk_size 50 --speedup \
+      --mode dtw --threshold_mode abs --threshold 0.03 \
       --num_epochs 16000 --kl_weight 10 --batch_size 8 \
       --hidden_dim 512 --dim_feedforward 3200 --lr 1e-5 --seed 0
 
@@ -30,6 +31,7 @@ import pickle
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "act"))
 
 from act.imitate_episodes import (
     train_bc,
@@ -54,13 +56,17 @@ class AdaptiveEpisodicDataset(EpisodicDataset):
         camera_names,
         norm_stats,
         chunk_size,
-        dtw_threshold=None,
+        mode=None,
+        threshold_mode=None,
+        threshold_value=None,
         speedup=False,
         constant_waypoint=None,
         policy_class="ACT",
     ):
         self.chunk_size = chunk_size
-        self.dtw_threshold = dtw_threshold
+        self.mode = mode
+        self.threshold_mode = threshold_mode
+        self.threshold_value = threshold_value
         self.speedup = speedup
         super().__init__(
             episode_ids,
@@ -100,14 +106,16 @@ class AdaptiveEpisodicDataset(EpisodicDataset):
                 action_len = episode_len - max(0, start_ts - 1)
 
             factors_read = False
-            if self.speedup and self.dtw_threshold is not None:
-                all_factors = load_factors_hdf5(dataset_path, self.chunk_size, self.dtw_threshold)
+            if self.speedup and self.mode is not None and self.threshold_mode is not None and self.threshold_value is not None:
+                all_factors = load_factors_hdf5(dataset_path, self.chunk_size, self.mode, self.threshold_mode, self.threshold_value)
                 if all_factors is not None:
                     factor = all_factors[start_ts]
                     factors_read = True
                 else:
                     import warnings
-                    warnings.warn(f"speedup=True but adaptive_factors_{self.chunk_size}_{str(self.dtw_threshold).replace('.', '_')} not found in {dataset_path}. "
+                    value_str = str(self.threshold_value).replace(".", "_")
+                    field_name = f"factors_{self.chunk_size}_{self.mode}_{self.threshold_mode}_{value_str}"
+                    warnings.warn(f"speedup=True but {field_name} not found in {dataset_path}. "
                                   f"Run compute_factors.py first. Falling back to no speedup.")
 
         self.is_sim = is_sim
@@ -138,9 +146,15 @@ class AdaptiveEpisodicDataset(EpisodicDataset):
 
 
 def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
-              chunk_size, dtw_threshold=None, speedup=False, constant_waypoint=None, policy_class="ACT"):
+              chunk_size, mode=None, threshold_mode=None, threshold_value=None,
+              speedup=False, constant_waypoint=None, policy_class="ACT"):
     print(f"\nData from: {dataset_dir}")
-    print(f"Speedup: {speedup}, chunk_size={chunk_size}, dtw_threshold={dtw_threshold}\n")
+    print(f"Speedup: {speedup}, chunk_size={chunk_size}")
+    if speedup:
+        value_str = str(threshold_value).replace(".", "_")
+        print(f"Factors: factors_{chunk_size}_{mode}_{threshold_mode}_{value_str}\n")
+    else:
+        print()
 
     train_ratio = 0.8
     shuffled_indices = np.random.permutation(num_episodes)
@@ -151,11 +165,13 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
 
     train_dataset = AdaptiveEpisodicDataset(
         train_indices, dataset_dir, camera_names, norm_stats, chunk_size,
-        dtw_threshold=dtw_threshold, speedup=speedup, constant_waypoint=constant_waypoint, policy_class=policy_class,
+        mode=mode, threshold_mode=threshold_mode, threshold_value=threshold_value,
+        speedup=speedup, constant_waypoint=constant_waypoint, policy_class=policy_class,
     )
     val_dataset = AdaptiveEpisodicDataset(
         val_indices, dataset_dir, camera_names, norm_stats, chunk_size,
-        dtw_threshold=dtw_threshold, speedup=speedup, constant_waypoint=constant_waypoint, policy_class=policy_class,
+        mode=mode, threshold_mode=threshold_mode, threshold_value=threshold_value,
+        speedup=speedup, constant_waypoint=constant_waypoint, policy_class=policy_class,
     )
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True,
@@ -187,9 +203,30 @@ def main():
     parser.add_argument("--diffusion_policy_cfg", type=str, default="act/image_aloha_diffusion_policy_cnn.yaml")
     parser.add_argument("--use_waypoint", action="store_true")
     parser.add_argument("--eval_speed", action="store_true")
-    parser.add_argument("--dtw_threshold", type=float, default=None, help="DTW threshold for loading factors (required when --speedup)")
+    parser.add_argument("--mode", type=str, choices=["dtw", "mse"], default=None,
+                        help="Distance metric for factor loading (required when --speedup)")
+    parser.add_argument("--threshold_mode", type=str, choices=["abs", "rel"], default=None,
+                        help="Threshold mode for factor loading (required when --speedup)")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Absolute threshold value (required for --threshold_mode abs)")
+    parser.add_argument("--ratio", type=float, default=None,
+                        help="Ratio value (required for --threshold_mode rel)")
 
     args = parser.parse_args()
+
+    _clean_sysargv = []
+    _skip_next = False
+    for a in sys.argv:
+        if _skip_next:
+            _skip_next = False
+            continue
+        if a in ("--mode", "--threshold_mode", "--threshold", "--ratio"):
+            _skip_next = True
+            continue
+        if any(a.startswith(p) for p in ("--mode=", "--threshold_mode=", "--threshold=", "--ratio=")):
+            continue
+        _clean_sysargv.append(a)
+    sys.argv = _clean_sysargv
 
     set_seed(1)
     is_eval = args.eval
@@ -203,6 +240,20 @@ def main():
     speedup = args.speedup
     constant_waypoint = args.constant_waypoint
     temporal_agg = args.temporal_agg
+    mode = args.mode
+    threshold_mode = args.threshold_mode
+
+    if speedup and not is_eval:
+        if mode is None:
+            parser.error("--mode is required when --speedup is set (e.g. --mode dtw)")
+        if threshold_mode is None:
+            parser.error("--threshold_mode is required when --speedup is set (e.g. --threshold_mode abs)")
+        if threshold_mode == "abs" and args.threshold is None:
+            parser.error("--threshold is required when --threshold_mode abs")
+        if threshold_mode == "rel" and args.ratio is None:
+            parser.error("--ratio is required when --threshold_mode rel")
+
+    threshold_value = args.threshold if threshold_mode == "abs" else (args.ratio if threshold_mode == "rel" else None)
 
     is_sim = True
     if is_sim:
@@ -271,7 +322,8 @@ def main():
 
     train_dataloader, val_dataloader, stats, _ = load_data(
         dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
-        chunk_size=args.chunk_size, dtw_threshold=args.dtw_threshold, speedup=speedup,
+        chunk_size=args.chunk_size, mode=mode, threshold_mode=threshold_mode,
+        threshold_value=threshold_value, speedup=speedup,
         constant_waypoint=constant_waypoint, policy_class=policy_class,
     )
 

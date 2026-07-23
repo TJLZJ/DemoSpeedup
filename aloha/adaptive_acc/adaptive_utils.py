@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from scipy.interpolate import interp1d
 
 
 def extract_action_chunk(actions, start_idx, length, pad_last_frame=True):
@@ -26,6 +27,20 @@ def resample_linear(actions, original_length, target_length):
     return resampled
 
 
+def compute_mse_distance(reference_chunk, extended_chunk, chunk_size):
+    L = len(extended_chunk)
+    if L < 2:
+        repeated = np.repeat(extended_chunk, chunk_size, axis=0)[:chunk_size]
+        return np.mean((reference_chunk - repeated) ** 2)
+    x_old = np.linspace(0, 1, L)
+    x_new = np.linspace(0, 1, chunk_size)
+    resampled = np.array([
+        interp1d(x_old, extended_chunk[:, d], kind="linear")(x_new)
+        for d in range(extended_chunk.shape[1])
+    ]).T
+    return np.mean((reference_chunk - resampled) ** 2)
+
+
 def process_action_adaptive(action_data, factor, chunk_size, action_len=None):
     action_np = action_data.cpu().numpy() if isinstance(action_data, torch.Tensor) else action_data
     L = max(1, int(chunk_size * factor))
@@ -40,11 +55,11 @@ def process_action_adaptive(action_data, factor, chunk_size, action_len=None):
     return action_data
 
 
-def load_factors_hdf5(dataset_path, chunk_size, dtw_threshold):
+def load_factors_hdf5(dataset_path, chunk_size, mode, threshold_mode, threshold_value):
     try:
         import h5py
-        threshold_str = str(dtw_threshold).replace(".", "_")
-        field_name = f"adaptive_factors_{chunk_size}_{threshold_str}"
+        value_str = str(threshold_value).replace(".", "_")
+        field_name = f"factors_{chunk_size}_{mode}_{threshold_mode}_{value_str}"
         with h5py.File(dataset_path, "r") as f:
             if field_name in f:
                 return np.array(f[field_name][()], dtype=np.float64)
@@ -53,10 +68,10 @@ def load_factors_hdf5(dataset_path, chunk_size, dtw_threshold):
     return None
 
 
-def write_factors_hdf5(dataset_path, factors, chunk_size, dtw_threshold):
+def write_factors_hdf5(dataset_path, factors, chunk_size, mode, threshold_mode, threshold_value):
     import h5py
-    threshold_str = str(dtw_threshold).replace(".", "_")
-    field_name = f"adaptive_factors_{chunk_size}_{threshold_str}"
+    value_str = str(threshold_value).replace(".", "_")
+    field_name = f"factors_{chunk_size}_{mode}_{threshold_mode}_{value_str}"
 
     with h5py.File(dataset_path, "r+") as f:
         f[field_name] = factors.astype(np.float64)

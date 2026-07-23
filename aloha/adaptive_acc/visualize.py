@@ -239,10 +239,24 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./videos", help="Output directory")
     parser.add_argument("--camera", type=str, default="top", help="Camera name (e.g. top, left_wrist, right_wrist)")
     parser.add_argument("--chunk_size", type=int, default=50, help="Chunk size (must match compute_factors.py)")
-    parser.add_argument("--dtw_threshold", type=float, required=True, help="DTW threshold (must match compute_factors.py)")
+    parser.add_argument("--mode", type=str, choices=["dtw", "mse"], required=True,
+                        help="Distance metric (must match compute_factors.py)")
+    parser.add_argument("--threshold_mode", type=str, choices=["abs", "rel"], required=True,
+                        help="Threshold mode (must match compute_factors.py)")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Absolute threshold value (required for --threshold_mode abs)")
+    parser.add_argument("--ratio", type=float, default=None,
+                        help="Ratio value (required for --threshold_mode rel)")
     parser.add_argument("--fps", type=int, default=50, help="Video FPS")
 
     args = parser.parse_args()
+
+    if args.threshold_mode == "abs" and args.threshold is None:
+        parser.error("--threshold is required when --threshold_mode abs")
+    if args.threshold_mode == "rel" and args.ratio is None:
+        parser.error("--ratio is required when --threshold_mode rel")
+
+    threshold_value = args.threshold if args.threshold_mode == "abs" else args.ratio
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -252,10 +266,11 @@ def main():
         qpos = f["/observations/qpos"][()]
         n_frames = images.shape[0]
 
-    factors = load_factors_hdf5(args.hdf5_path, args.chunk_size, args.dtw_threshold)
+    factors = load_factors_hdf5(args.hdf5_path, args.chunk_size, args.mode, args.threshold_mode, threshold_value)
     if factors is None:
-        threshold_str = str(args.dtw_threshold).replace(".", "_")
-        print(f"WARNING: adaptive_factors_{args.chunk_size}_{threshold_str} not found in HDF5, using all 1.0")
+        value_str = str(threshold_value).replace(".", "_")
+        field_name = f"factors_{args.chunk_size}_{args.mode}_{args.threshold_mode}_{value_str}"
+        print(f"WARNING: {field_name} not found in HDF5, using all 1.0")
         factors = np.ones(n_frames, dtype=np.float64)
 
     base_name = os.path.splitext(os.path.basename(args.hdf5_path))[0]
