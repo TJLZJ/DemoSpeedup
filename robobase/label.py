@@ -1,6 +1,25 @@
 from pathlib import Path
 import os
 import hydra
+from omegaconf import OmegaConf
+
+
+def _adapt_dir_suffix(adaptive):
+    if adaptive is None or adaptive is False or not hasattr(adaptive, "get"):
+        return "default"
+    mode = adaptive.get("mode", "default")
+    th_mode = adaptive.get("threshold_mode", "default")
+    chunk = adaptive.get("chunk_size", 24)
+    if th_mode == "abs":
+        val = str(adaptive.get("threshold", 0.05)).replace(".", "_")
+    elif th_mode == "rel":
+        val = str(adaptive.get("ratio", 0.4)).replace(".", "_")
+    else:
+        val = th_mode
+    return f"c{chunk}_{mode}_{th_mode}_{val}"
+
+
+OmegaConf.register_new_resolver("adapt_dir", _adapt_dir_suffix, replace=True)
 
 
 @hydra.main(

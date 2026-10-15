@@ -91,6 +91,8 @@ def _create_default_envs(cfg: DictConfig) -> EnvFactory:
         factory = BiGymEnvFactory()
         if cfg.speedup:
             factory.HIGH_GAIN = True
+        if cfg.get("adaptive", False):
+            factory.HIGH_GAIN = True
     elif cfg.env.env_name == "d4rl":
         from robobase.envs.d4rl import D4RLEnvFactory
 
@@ -574,6 +576,24 @@ class Workspace:
             self.teacher_actions.append(np.load(file_path))
             episode += 1
 
+    def load_factors(self):
+        from robobase.adaptive_acc.adaptive_utils import (
+            load_factors_npy, _build_factor_subdir
+        )
+        base_dir = os.path.join(
+            self.work_dir, f'../../factors/{self.cfg.env.task_name}'
+        )
+        subdir = _build_factor_subdir(self.cfg.adaptive)
+        dir_path = os.path.join(base_dir, subdir)
+        self.factors = []
+        episode = 0
+        assert os.path.exists(os.path.join(dir_path, f'factors_{episode}.npy'))
+        while os.path.exists(os.path.join(dir_path, f'factors_{episode}.npy')):
+            self.factors.append(
+                load_factors_npy(base_dir, episode, adaptive_cfg=self.cfg.adaptive)
+            )
+            episode += 1
+
     def check_labels(self):
         # Check if the length of labels match the length of the filtered demos
         for i in range(len(self.labels)):
@@ -680,19 +700,30 @@ class Workspace:
 
     def _load_demos(self):
         if (num_demos := self.cfg.demos) != 0:
+            use_adaptive = self.cfg.get("adaptive", False) if hasattr(self.cfg, "get") else False
             # NOTE: Currently we do not protect demos from being evicted from replay
             if self.cfg.speedup:
                 self.load_teacher_actions()
                 self.replay_buffer._set_teacher_actions(self.teacher_actions)
                 self.load_labels()
                 self.replay_buffer._set_labels(self.labels)
+            elif use_adaptive:
+                self.load_factors()
+                self.replay_buffer._set_factors(self.factors)
+                self.labels = None
+                self.teacher_actions = None
             else:
                 self.teacher_actions = None
                 self.labels = None
+                self.factors = None
             
-            self.replay_buffer.set_flag(speedup=self.cfg.speedup)
+            self.replay_buffer.set_flag(
+                speedup=self.cfg.speedup, adaptive=use_adaptive
+            )
             if self.use_demo_replay:
-                self.demo_replay_buffer.set_flag(speedup=self.cfg.speedup)
+                self.demo_replay_buffer.set_flag(
+                    speedup=self.cfg.speedup, adaptive=use_adaptive
+                )
 
 
             self.env_factory.load_demos_into_replay(
@@ -702,9 +733,11 @@ class Workspace:
                 labels = self.labels
             )
             if self.use_demo_replay:
-                # Load demos to the dedicated demo_replay_buffer
-                self.demo_replay_buffer._set_labels(self.labels)
-                self.demo_replay_buffer._set_teacher_actions(self.teacher_actions)
+                if use_adaptive:
+                    self.demo_replay_buffer._set_factors(self.factors)
+                else:
+                    self.demo_replay_buffer._set_labels(self.labels)
+                    self.demo_replay_buffer._set_teacher_actions(self.teacher_actions)
                 self.env_factory.load_demos_into_replay(
                     self.cfg, self.demo_replay_buffer, is_demo_buffer=True
                 )

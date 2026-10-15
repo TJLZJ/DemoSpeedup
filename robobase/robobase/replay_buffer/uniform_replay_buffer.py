@@ -41,6 +41,7 @@ IS_FIRST = "is_first"
 DISCOUNT = "discount"
 LABEL = "label"
 TEACHER_ACTION = "teacher_action"
+FACTOR = "factor"
 MIX_ACTION = "mix_action"
 
 def episode_len(episode):
@@ -322,7 +323,9 @@ class UniformReplayBuffer(ReplayBuffer):
         self._is_first = True
         self.labels = None
         self.teacher_actions = None
+        self.adaptive_factors = None
         self.speedup = False
+        self.adaptive = False
 
     @property
     def frame_stack(self):
@@ -486,8 +489,9 @@ class UniformReplayBuffer(ReplayBuffer):
         self._current_episode = defaultdict(list)
         self._store_episode(episode)
     
-    def set_flag(self,speedup):
+    def set_flag(self, speedup=False, adaptive=False):
         self.speedup = speedup
+        self.adaptive = adaptive
 
     def _store_episode(self, episode):
         if self._sequential:
@@ -502,9 +506,15 @@ class UniformReplayBuffer(ReplayBuffer):
             episode[LABEL] = label
         if self.teacher_actions is not None:
             teacher_action = self.teacher_actions[eps_idx]
-            # print(len(teacher_action),eps_len+1)
             assert (eps_len+1) == len(teacher_action)
             episode[TEACHER_ACTION] = teacher_action
+        if self.adaptive_factors is not None:
+            factor = self.adaptive_factors[eps_idx]
+            if len(factor) != (eps_len + 1):
+                print(f"[WARN] Factor len mismatch ep{eps_idx}: factor={len(factor)} eps={eps_len+1}, "
+                      f"factors_total={len(self.adaptive_factors)}, demos_stored={eps_idx}")
+                factor = factor[:eps_len+1] if len(factor) >= eps_len+1 else np.pad(factor, (0, eps_len+1-len(factor)), 'edge')
+            episode[FACTOR] = factor
         
         
         global_idx = self.add_count - eps_len
@@ -709,6 +719,9 @@ class UniformReplayBuffer(ReplayBuffer):
     def _set_teacher_actions(self, teacher_actions):
         self.teacher_actions = teacher_actions
 
+    def _set_factors(self, factors):
+        self.adaptive_factors = factors
+
     def _sample_sequential(self, global_index=None):
         # Sample transition index
         if global_index is None:
@@ -846,6 +859,16 @@ class UniformReplayBuffer(ReplayBuffer):
           action_seq =  episode[TEACHER_ACTION][action_start_idx:] 
           action_seq, indices = downsample_action_with_labels(action_seq,label.copy(),self._action_seq_len)
           action_seq = action_seq.astype(np.float32)
+        elif self.adaptive:
+          from robobase.adaptive_acc.adaptive_utils import process_action_adaptive
+          factor = float(episode.get(FACTOR, [1.0])[idx])
+          raw_action = episode[TEACHER_ACTION] if TEACHER_ACTION in episode else episode[ACTION]
+          action_seq = process_action_adaptive(
+              raw_action[action_start_idx:],
+              factor,
+              self._action_seq_len,
+              len(raw_action) - action_start_idx,
+          ).astype(np.float32)
          # - Pad zeros to the end if action_sequences exceeds eps_len
         if len(action_seq) < self._action_seq_len:
             num_action_to_pad = self._action_seq_len - len(action_seq)

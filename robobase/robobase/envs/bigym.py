@@ -197,6 +197,7 @@ class BiGymEnvFactory(EnvFactory):
             amount=num_demos,
             frequency=CONTROL_FREQUENCY_MAX // cfg.env.demo_down_sample_rate,
         )
+        demos.sort(key=lambda d: d.uuid)
 
         for demo in demos:
             for ts in demo.timesteps:
